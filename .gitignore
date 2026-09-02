@@ -1,0 +1,13 @@
+# Build output
+minicontainer
+
+# Agent workspace (local only, not for version control)
+.agents/
+
+# Go
+*.test
+*.out
+vendor/
+
+# Rootfs assets (downloaded locally)
+assets/rootfs/

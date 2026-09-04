@@ -17,14 +17,30 @@ func TestConfig_DefaultZeroValues(t *testing.T) {
 	if cfg.Rootfs != "" {
 		t.Errorf("zero-value Rootfs should be empty string, got %q", cfg.Rootfs)
 	}
+	if cfg.MemoryLimit != 0 {
+		t.Errorf("zero-value MemoryLimit should be 0, got %d", cfg.MemoryLimit)
+	}
+	if cfg.PidsLimit != 0 {
+		t.Errorf("zero-value PidsLimit should be 0, got %d", cfg.PidsLimit)
+	}
+	if cfg.CpuQuota != 0 {
+		t.Errorf("zero-value CpuQuota should be 0, got %d", cfg.CpuQuota)
+	}
+	if cfg.CpuPeriod != 0 {
+		t.Errorf("zero-value CpuPeriod should be 0, got %d", cfg.CpuPeriod)
+	}
 }
 
 func TestConfig_FieldAssignment(t *testing.T) {
 	cfg := Config{
-		Command:  "/bin/bash",
-		Args:     []string{"-i"},
-		Hostname: "minicontainer",
-		Rootfs:   "assets/rootfs",
+		Command:     "/bin/bash",
+		Args:        []string{"-i"},
+		Hostname:    "minicontainer",
+		Rootfs:      "assets/rootfs",
+		MemoryLimit: 104857600,
+		PidsLimit:   20,
+		CpuQuota:    50000,
+		CpuPeriod:   100000,
 	}
 
 	if cfg.Command != "/bin/bash" {
@@ -38,6 +54,18 @@ func TestConfig_FieldAssignment(t *testing.T) {
 	}
 	if cfg.Rootfs != "assets/rootfs" {
 		t.Errorf("expected Rootfs %q, got %q", "assets/rootfs", cfg.Rootfs)
+	}
+	if cfg.MemoryLimit != 104857600 {
+		t.Errorf("expected MemoryLimit 104857600, got %d", cfg.MemoryLimit)
+	}
+	if cfg.PidsLimit != 20 {
+		t.Errorf("expected PidsLimit 20, got %d", cfg.PidsLimit)
+	}
+	if cfg.CpuQuota != 50000 {
+		t.Errorf("expected CpuQuota 50000, got %d", cfg.CpuQuota)
+	}
+	if cfg.CpuPeriod != 100000 {
+		t.Errorf("expected CpuPeriod 100000, got %d", cfg.CpuPeriod)
 	}
 }
 

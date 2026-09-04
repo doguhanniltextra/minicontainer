@@ -2,20 +2,89 @@ package container
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"syscall"
 	"testing"
 )
 
-// mockCmdRunner records the last command passed to Run.
+// mockCmdRunner records commands and controls process execution simulation.
 type mockCmdRunner struct {
-	lastCmd *exec.Cmd
-	runErr  error
+	lastCmd  *exec.Cmd
+	runErr   error
+	startErr error
+	waitErr  error
+
+	onStart func()
+	onWait  func()
 }
 
 func (m *mockCmdRunner) Run(cmd *exec.Cmd) error {
 	m.lastCmd = cmd
 	return m.runErr
+}
+
+func (m *mockCmdRunner) Start(cmd *exec.Cmd) error {
+	m.lastCmd = cmd
+	if cmd.Process == nil {
+		cmd.Process = &os.Process{Pid: 12345}
+	}
+	if m.onStart != nil {
+		m.onStart()
+	}
+	if m.startErr != nil {
+		return m.startErr
+	}
+	return m.runErr
+}
+
+func (m *mockCmdRunner) Wait(cmd *exec.Cmd) error {
+	if m.onWait != nil {
+		m.onWait()
+	}
+	return m.waitErr
+}
+
+// mockCgroupManager records cgroup lifecycle calls and parameters for unit testing.
+type mockCgroupManager struct {
+	calls         []string
+	appliedCfg    Config
+	addedPid      int
+	cleanedUp     bool
+	applyErr      error
+	addProcessErr error
+	cleanupErr    error
+
+	onApply      func()
+	onAddProcess func()
+	onCleanup    func()
+}
+
+func (m *mockCgroupManager) apply(cfg Config) error {
+	m.calls = append(m.calls, "apply")
+	m.appliedCfg = cfg
+	if m.onApply != nil {
+		m.onApply()
+	}
+	return m.applyErr
+}
+
+func (m *mockCgroupManager) addProcess(pid int) error {
+	m.calls = append(m.calls, "addProcess")
+	m.addedPid = pid
+	if m.onAddProcess != nil {
+		m.onAddProcess()
+	}
+	return m.addProcessErr
+}
+
+func (m *mockCgroupManager) cleanup() error {
+	m.calls = append(m.calls, "cleanup")
+	m.cleanedUp = true
+	if m.onCleanup != nil {
+		m.onCleanup()
+	}
+	return m.cleanupErr
 }
 
 // mockExecer records the arguments passed to Exec and can return a configured error.
@@ -120,6 +189,147 @@ func TestRunWith_PropagatesRunnerError(t *testing.T) {
 	err := runWith(cfg, mock)
 	if !errors.Is(err, expected) {
 		t.Errorf("expected error %v, got %v", expected, err)
+	}
+}
+
+func TestRunWith_CreatesCgroupBeforeStart(t *testing.T) {
+	var events []string
+	mockCg := &mockCgroupManager{
+		onApply: func() {
+			events = append(events, "apply")
+		},
+	}
+	mockRunner := &mockCmdRunner{
+		onStart: func() {
+			events = append(events, "start")
+		},
+	}
+
+	cfg := Config{
+		Command:     "/bin/sh",
+		MemoryLimit: 104857600,
+	}
+
+	if err := runWith(cfg, mockRunner, mockCg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(events) < 2 {
+		t.Fatalf("expected at least 2 events, got %v", events)
+	}
+	if events[0] != "apply" || events[1] != "start" {
+		t.Errorf("expected apply before start, got event order: %v", events)
+	}
+	if mockCg.appliedCfg.MemoryLimit != 104857600 {
+		t.Errorf("expected MemoryLimit 104857600, got %d", mockCg.appliedCfg.MemoryLimit)
+	}
+}
+
+func TestRunWith_AddsPidAfterStart(t *testing.T) {
+	var events []string
+	mockCg := &mockCgroupManager{
+		onAddProcess: func() {
+			events = append(events, "addProcess")
+		},
+	}
+	mockRunner := &mockCmdRunner{
+		onStart: func() {
+			events = append(events, "start")
+		},
+		onWait: func() {
+			events = append(events, "wait")
+		},
+	}
+
+	cfg := Config{
+		Command:   "/bin/sh",
+		PidsLimit: 20,
+	}
+
+	if err := runWith(cfg, mockRunner, mockCg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(events) < 3 {
+		t.Fatalf("expected at least 3 events, got %v", events)
+	}
+	if events[0] != "start" || events[1] != "addProcess" || events[2] != "wait" {
+		t.Errorf("expected start -> addProcess -> wait, got: %v", events)
+	}
+	if mockCg.addedPid != 12345 {
+		t.Errorf("expected child PID 12345 to be added to cgroup, got %d", mockCg.addedPid)
+	}
+}
+
+func TestRunWith_CleansUpOnExit(t *testing.T) {
+	mockCg := &mockCgroupManager{}
+	mockRunner := &mockCmdRunner{}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		CpuQuota: 50000,
+	}
+
+	if err := runWith(cfg, mockRunner, mockCg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !mockCg.cleanedUp {
+		t.Error("expected cgroup cleanup() to be called on exit")
+	}
+}
+
+func TestRunWith_NoCgroup_WhenNoLimitsSet(t *testing.T) {
+	mockCg := &mockCgroupManager{}
+	mockRunner := &mockCmdRunner{}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "test-box",
+		Rootfs:   "assets/rootfs",
+	}
+
+	if err := runWith(cfg, mockRunner, mockCg); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if len(mockCg.calls) > 0 {
+		t.Errorf("expected no cgroup operations when limits are zero, got calls: %v", mockCg.calls)
+	}
+}
+
+func TestRunWith_CgroupApplyError_AbortsBeforeStart(t *testing.T) {
+	applyErr := errors.New("cannot apply limits")
+	mockCg := &mockCgroupManager{applyErr: applyErr}
+	mockRunner := &mockCmdRunner{}
+
+	cfg := Config{Command: "/bin/sh", MemoryLimit: 104857600}
+	err := runWith(cfg, mockRunner, mockCg)
+
+	if !errors.Is(err, applyErr) {
+		t.Errorf("expected apply error %v, got %v", applyErr, err)
+	}
+	if mockRunner.lastCmd != nil {
+		t.Error("expected runner.Start not to be called when apply fails")
+	}
+	if !mockCg.cleanedUp {
+		t.Error("expected cleanup to be called even when apply fails")
+	}
+}
+
+func TestRunWith_CgroupAddProcessError_Aborts(t *testing.T) {
+	addErr := errors.New("cannot add pid")
+	mockCg := &mockCgroupManager{addProcessErr: addErr}
+	mockRunner := &mockCmdRunner{}
+
+	cfg := Config{Command: "/bin/sh", PidsLimit: 20}
+	err := runWith(cfg, mockRunner, mockCg)
+
+	if !errors.Is(err, addErr) {
+		t.Errorf("expected addProcess error %v, got %v", addErr, err)
+	}
+	if !mockCg.cleanedUp {
+		t.Error("expected cleanup to be called when addProcess fails")
 	}
 }
 

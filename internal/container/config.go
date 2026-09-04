@@ -15,3 +15,8 @@ type Config struct {
 	CpuQuota    int64 // microseconds per period (e.g. 50000 = 50ms = 0.5 core)
 	CpuPeriod   int64 // microseconds; default 100000 (100ms)
 }
+
+// hasLimits returns true if any resource limit is configured.
+func (c Config) hasLimits() bool {
+	return c.MemoryLimit > 0 || c.PidsLimit > 0 || c.CpuQuota > 0
+}

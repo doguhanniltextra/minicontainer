@@ -82,3 +82,26 @@ func TestConfig_EmptyArgs(t *testing.T) {
 		t.Errorf("expected empty Args slice, got length %d", len(cfg.Args))
 	}
 }
+
+func TestConfig_HasLimits(t *testing.T) {
+	if (Config{}).hasLimits() {
+		t.Error("expected hasLimits to be false for zero Config")
+	}
+
+	if !(Config{MemoryLimit: 104857600}).hasLimits() {
+		t.Error("expected hasLimits to be true when MemoryLimit > 0")
+	}
+
+	if !(Config{PidsLimit: 20}).hasLimits() {
+		t.Error("expected hasLimits to be true when PidsLimit > 0")
+	}
+
+	if !(Config{CpuQuota: 50000}).hasLimits() {
+		t.Error("expected hasLimits to be true when CpuQuota > 0")
+	}
+
+	// CpuPeriod alone without CpuQuota does not constitute active limits
+	if (Config{CpuPeriod: 100000}).hasLimits() {
+		t.Error("expected hasLimits to be false when only CpuPeriod is set")
+	}
+}

@@ -42,9 +42,9 @@ func Init() error {
 }
 
 // runWith is the testable core of Run.
-// It re-execs /proc/self/exe with ContainerInitArg so the child enters its new namespaces
-// before doing any setup.
-func runWith(cfg Config, runner cmdRunner) error {
+// It sets up cgroups if limits are configured, re-execs /proc/self/exe with
+// ContainerInitArg, attaches the child PID to the cgroup, and waits for completion.
+func runWith(cfg Config, runner cmdRunner, cgs ...cgroupManager) error {
 	// Construct: /proc/self/exe container-init <command> [args...]
 	args := append([]string{ContainerInitArg, cfg.Command}, cfg.Args...)
 	cmd := exec.Command("/proc/self/exe", args...)
@@ -63,7 +63,45 @@ func runWith(cfg Config, runner cmdRunner) error {
 	// The parent's namespaces are not affected.
 	cmd.SysProcAttr = buildSysProcAttr()
 
-	return runner.Run(cmd)
+	if cfg.hasLimits() {
+		var cg cgroupManager
+		if len(cgs) > 0 && cgs[0] != nil {
+			cg = cgs[0]
+		} else {
+			var err error
+			cg, err = newCgroupManager()
+			if err != nil {
+				return fmt.Errorf("creating cgroup: %w", err)
+			}
+		}
+		defer cg.cleanup()
+
+		if err := cg.apply(cfg); err != nil {
+			return fmt.Errorf("applying cgroup limits: %w", err)
+		}
+
+		if err := runner.Start(cmd); err != nil {
+			return fmt.Errorf("starting container process: %w", err)
+		}
+
+		if err := cg.addProcess(cmd.Process.Pid); err != nil {
+			return fmt.Errorf("adding process to cgroup: %w", err)
+		}
+
+		if err := runner.Wait(cmd); err != nil {
+			return fmt.Errorf("waiting for container process: %w", err)
+		}
+
+		return nil
+	}
+
+	if err := runner.Start(cmd); err != nil {
+		return fmt.Errorf("starting container process: %w", err)
+	}
+	if err := runner.Wait(cmd); err != nil {
+		return fmt.Errorf("waiting for container process: %w", err)
+	}
+	return nil
 }
 
 // initWith is the testable core of Init.

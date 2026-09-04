@@ -16,19 +16,19 @@ const (
 	defaultCpuPeriodUs = 100000 // 100ms in microseconds
 )
 
-// cgroupManager manages the lifecycle and resource limits of a Linux cgroup v2 directory.
-type cgroupManager struct {
+// realCgroupManager manages the lifecycle and resource limits of a Linux cgroup v2 directory.
+type realCgroupManager struct {
 	path string
 	fs   fsWriter
 }
 
 // newCgroupManager creates a unique cgroup directory under /sys/fs/cgroup and returns a manager.
-func newCgroupManager() (*cgroupManager, error) {
+func newCgroupManager() (cgroupManager, error) {
 	return newCgroupManagerWith(realFsWriter{})
 }
 
-// newCgroupManagerWith creates a cgroupManager with an injected fsWriter implementation.
-func newCgroupManagerWith(fs fsWriter) (*cgroupManager, error) {
+// newCgroupManagerWith creates a realCgroupManager with an injected fsWriter implementation.
+func newCgroupManagerWith(fs fsWriter) (*realCgroupManager, error) {
 	b := make([]byte, 4)
 	if _, err := rand.Read(b); err != nil {
 		return nil, fmt.Errorf("generating cgroup id: %w", err)
@@ -40,12 +40,12 @@ func newCgroupManagerWith(fs fsWriter) (*cgroupManager, error) {
 }
 
 // newCgroupManagerWithPath creates a cgroup directory at the exact path specified using the injected fsWriter.
-func newCgroupManagerWithPath(fs fsWriter, path string) (*cgroupManager, error) {
+func newCgroupManagerWithPath(fs fsWriter, path string) (*realCgroupManager, error) {
 	if err := fs.MkdirAll(path, 0755); err != nil {
 		return nil, fmt.Errorf("creating cgroup directory %s: %w", path, err)
 	}
 
-	return &cgroupManager{
+	return &realCgroupManager{
 		path: path,
 		fs:   fs,
 	}, nil
@@ -53,7 +53,7 @@ func newCgroupManagerWithPath(fs fsWriter, path string) (*cgroupManager, error) 
 
 // apply writes configured resource limits from Config to the appropriate cgroup v2 limit files.
 // Fields with value 0 are skipped (unlimited).
-func (c *cgroupManager) apply(cfg Config) error {
+func (c *realCgroupManager) apply(cfg Config) error {
 	if cfg.MemoryLimit > 0 {
 		memFile := filepath.Join(c.path, memoryLimitFile)
 		val := strconv.FormatInt(cfg.MemoryLimit, 10)
@@ -87,7 +87,7 @@ func (c *cgroupManager) apply(cfg Config) error {
 
 // addProcess writes the specified PID to cgroup.procs, attaching the process
 // and all its future child processes to this cgroup.
-func (c *cgroupManager) addProcess(pid int) error {
+func (c *realCgroupManager) addProcess(pid int) error {
 	procsFile := filepath.Join(c.path, cgroupProcsFile)
 	val := strconv.Itoa(pid)
 	if err := c.fs.WriteFile(procsFile, []byte(val), 0644); err != nil {
@@ -98,9 +98,10 @@ func (c *cgroupManager) addProcess(pid int) error {
 
 // cleanup removes the cgroup directory. It should be called in a defer
 // statement once the container process exits.
-func (c *cgroupManager) cleanup() error {
+func (c *realCgroupManager) cleanup() error {
 	if err := c.fs.Remove(c.path); err != nil {
 		return fmt.Errorf("removing cgroup %s: %w", c.path, err)
 	}
 	return nil
 }
+

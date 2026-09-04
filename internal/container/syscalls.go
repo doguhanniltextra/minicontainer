@@ -38,10 +38,20 @@ type pivotRooter interface {
 }
 
 // cmdRunner abstracts executing an external command.
-// The real implementation calls (*exec.Cmd).Run().
+// The real implementation calls (*exec.Cmd).Run(), (*exec.Cmd).Start(), and (*exec.Cmd).Wait().
 // Tests can inject a mock to avoid spawning actual child processes.
 type cmdRunner interface {
 	Run(cmd *exec.Cmd) error
+	Start(cmd *exec.Cmd) error
+	Wait(cmd *exec.Cmd) error
+}
+
+// cgroupManager abstracts the lifecycle and limit management of a cgroup.
+// Tests can inject a mock to track cgroup operations without root privileges.
+type cgroupManager interface {
+	apply(cfg Config) error
+	addProcess(pid int) error
+	cleanup() error
 }
 
 // execer abstracts syscall.Exec so Init() can be fully unit tested
@@ -88,6 +98,14 @@ type realCmdRunner struct{}
 
 func (r realCmdRunner) Run(cmd *exec.Cmd) error {
 	return cmd.Run()
+}
+
+func (r realCmdRunner) Start(cmd *exec.Cmd) error {
+	return cmd.Start()
+}
+
+func (r realCmdRunner) Wait(cmd *exec.Cmd) error {
+	return cmd.Wait()
 }
 
 // realExecer is the production implementation of execer.

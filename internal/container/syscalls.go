@@ -1,9 +1,19 @@
 package container
 
 import (
+	"io/fs"
+	"os"
 	"os/exec"
 	"syscall"
 )
+
+// fsWriter abstracts filesystem write operations used by the cgroup manager.
+// Tests can inject a mock to avoid requiring root privileges or real cgroups.
+type fsWriter interface {
+	MkdirAll(path string, perm fs.FileMode) error
+	WriteFile(name string, data []byte, perm fs.FileMode) error
+	Remove(name string) error
+}
 
 // hostnamer abstracts the syscall needed to set the hostname.
 // The real implementation calls syscall.Sethostname directly.
@@ -87,3 +97,20 @@ type realExecer struct{}
 func (r realExecer) Exec(argv0 string, argv []string, envv []string) error {
 	return syscall.Exec(argv0, argv, envv)
 }
+
+// realFsWriter is the production implementation of fsWriter.
+// It delegates directly to os.MkdirAll, os.WriteFile, and os.Remove.
+type realFsWriter struct{}
+
+func (r realFsWriter) MkdirAll(path string, perm fs.FileMode) error {
+	return os.MkdirAll(path, perm)
+}
+
+func (r realFsWriter) WriteFile(name string, data []byte, perm fs.FileMode) error {
+	return os.WriteFile(name, data, perm)
+}
+
+func (r realFsWriter) Remove(name string) error {
+	return os.Remove(name)
+}
+

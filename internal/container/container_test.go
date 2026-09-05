@@ -100,6 +100,98 @@ func (m *mockExecer) Exec(argv0 string, argv []string, envv []string) error {
 	return m.err
 }
 
+// mockNetworkManager records network lifecycle calls for testing container.go.
+type mockNetworkManager struct {
+	events          []string
+	createdHostVeth string
+	createdContVeth string
+	netnsPid        int
+	attachedBridge  string
+	attachedIf      string
+
+	ensureBridgeErr   error
+	enableOutboundErr error
+	createVethErr     error
+	attachBridgeErr   error
+	moveToNetnsErr    error
+	configureNetErr   error
+
+	onEnsureBridge   func()
+	onEnableOutbound func()
+	onCreateVeth     func()
+	onAttachBridge   func()
+	onMoveToNetns    func()
+	onConfigureNet   func()
+}
+
+func (m *mockNetworkManager) EnsureBridge(bridgeName, ipCIDR string) error {
+	m.events = append(m.events, "ensureBridge")
+	if m.onEnsureBridge != nil {
+		m.onEnsureBridge()
+	}
+	return m.ensureBridgeErr
+}
+
+func (m *mockNetworkManager) EnableOutboundAccess(subnetCIDR, bridgeName string) error {
+	m.events = append(m.events, "enableOutboundAccess")
+	if m.onEnableOutbound != nil {
+		m.onEnableOutbound()
+	}
+	return m.enableOutboundErr
+}
+
+func (m *mockNetworkManager) CreateVethPair(hostVeth, contVeth string) error {
+	m.events = append(m.events, "createVeth")
+	m.createdHostVeth = hostVeth
+	m.createdContVeth = contVeth
+	if m.onCreateVeth != nil {
+		m.onCreateVeth()
+	}
+	return m.createVethErr
+}
+
+func (m *mockNetworkManager) AttachToBridge(bridgeName, ifName string) error {
+	m.events = append(m.events, "attachBridge")
+	m.attachedBridge = bridgeName
+	m.attachedIf = ifName
+	if m.onAttachBridge != nil {
+		m.onAttachBridge()
+	}
+	return m.attachBridgeErr
+}
+
+func (m *mockNetworkManager) MoveInterfaceToNetns(ifName string, pid int) error {
+	m.events = append(m.events, "moveToNetns")
+	m.netnsPid = pid
+	if m.onMoveToNetns != nil {
+		m.onMoveToNetns()
+	}
+	return m.moveToNetnsErr
+}
+
+func (m *mockNetworkManager) ConfigureContainerNetwork(contVeth, ipCIDR, gatewayIP string) error {
+	m.events = append(m.events, "configureNet")
+	if m.onConfigureNet != nil {
+		m.onConfigureNet()
+	}
+	return m.configureNetErr
+}
+
+// mockSyncWaiter records Wait() calls for testing container-init synchronization.
+type mockSyncWaiter struct {
+	waited  bool
+	waitErr error
+	onWait  func()
+}
+
+func (m *mockSyncWaiter) Wait() error {
+	m.waited = true
+	if m.onWait != nil {
+		m.onWait()
+	}
+	return m.waitErr
+}
+
 // --- runWith tests ---
 
 func TestRunWith_ReexecsSelfWithContainerInitArg(t *testing.T) {
@@ -414,3 +506,417 @@ func TestInitWith_MountError_AbortsBeforeExec(t *testing.T) {
 		t.Errorf("expected no exec on mount failure, got %q", mockE.calledArgv0)
 	}
 }
+
+func TestRunWith_NetworkSetupSequence(t *testing.T) {
+	var events []string
+	mockNet := &mockNetworkManager{
+		onEnsureBridge:   func() { events = append(events, "ensureBridge") },
+		onEnableOutbound: func() { events = append(events, "enableOutboundAccess") },
+		onCreateVeth:     func() { events = append(events, "createVeth") },
+		onMoveToNetns:    func() { events = append(events, "moveToNetns") },
+		onAttachBridge:   func() { events = append(events, "attachBridge") },
+	}
+	mockRunner := &mockCmdRunner{
+		onStart: func() { events = append(events, "start") },
+		onWait:  func() { events = append(events, "wait") },
+	}
+
+	cfg := Config{
+		Command: "/bin/sh",
+	}
+
+	if err := runWith(cfg, mockRunner, mockNet); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	expectedOrder := []string{
+		"ensureBridge",
+		"enableOutboundAccess",
+		"createVeth",
+		"start",
+		"moveToNetns",
+		"attachBridge",
+		"wait",
+	}
+
+	if len(events) != len(expectedOrder) {
+		t.Fatalf("expected %d events, got %d: %v", len(expectedOrder), len(events), events)
+	}
+
+	for i, expected := range expectedOrder {
+		if events[i] != expected {
+			t.Errorf("step %d: expected %s, got %s (full trace: %v)", i, expected, events[i], events)
+		}
+	}
+
+	// Verify that extra file (sync pipe) was attached to the command
+	if len(mockRunner.lastCmd.ExtraFiles) == 0 {
+		t.Error("expected sync pipe to be passed in ExtraFiles, got none")
+	}
+
+	// Verify child PID was forwarded to MoveInterfaceToNetns
+	if mockNet.netnsPid != 12345 {
+		t.Errorf("expected child PID 12345 to be passed to MoveInterfaceToNetns, got %d", mockNet.netnsPid)
+	}
+}
+
+func TestRunWith_ReleasesIPOnExit(t *testing.T) {
+	ipam, err := NewIPAM("172.19.0.0/16", "172.19.0.1")
+	if err != nil {
+		t.Fatalf("NewIPAM failed: %v", err)
+	}
+
+	mockNet := &mockNetworkManager{}
+	mockRunner := &mockCmdRunner{}
+
+	cfg := Config{Command: "/bin/sh"}
+
+	if err := runWith(cfg, mockRunner, mockNet, ipam); err != nil {
+		t.Fatalf("runWith failed: %v", err)
+	}
+
+	// Because IP was released on container exit, allocating now should return 172.19.0.2/16 again
+	nextIP, err := ipam.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate after container exit failed: %v", err)
+	}
+	if nextIP != "172.19.0.2/16" {
+		t.Errorf("expected released IP 172.19.0.2/16 to be reused, got %s", nextIP)
+	}
+}
+
+func TestInitWith_WaitsOnSyncPipeAndConfiguresNetwork(t *testing.T) {
+	var events []string
+	mockNet := &mockNetworkManager{
+		onConfigureNet: func() { events = append(events, "configureNet") },
+	}
+	mockSyncer := &mockSyncWaiter{
+		onWait: func() { events = append(events, "syncWait") },
+	}
+	mockH := &mockHostnamer{}
+	mockM := &mockMounter{}
+	mockP := &mockPivotRooter{}
+	mockE := &mockExecer{}
+
+	netCfg := networkInitConfig{
+		netMgr:   mockNet,
+		syncer:   mockSyncer,
+		contVeth: "mc-c-test",
+		ip:       "172.19.0.2/16",
+		gateway:  "172.19.0.1",
+	}
+
+	tempRootfs := t.TempDir()
+	err := initWith("test-host", tempRootfs, "/bin/sh", []string{"/bin/sh"}, mockH, mockM, mockP, mockE, netCfg)
+	if err != nil {
+		t.Fatalf("initWith failed: %v", err)
+	}
+
+	if !mockSyncer.waited {
+		t.Error("expected syncer.Wait() to be called")
+	}
+
+	expectedOrder := []string{"syncWait", "configureNet"}
+	if len(events) != len(expectedOrder) {
+		t.Fatalf("expected %d events, got %d: %v", len(expectedOrder), len(events), events)
+	}
+	for i, expected := range expectedOrder {
+		if events[i] != expected {
+			t.Errorf("step %d: expected %s, got %s", i, expected, events[i])
+		}
+	}
+}
+
+// mockContainerStore records container store lifecycle operations.
+type mockContainerStore struct {
+	createdRoots  []string
+	createdID     string
+	createdMerged string
+	createErr     error
+
+	destroyedIDs []string
+	destroyErr   error
+
+	upperPath  string
+	workPath   string
+	mergedPath string
+
+	onCreate  func()
+	onDestroy func()
+}
+
+func (m *mockContainerStore) Create(imageRootfs string) (string, string, error) {
+	m.createdRoots = append(m.createdRoots, imageRootfs)
+	if m.onCreate != nil {
+		m.onCreate()
+	}
+	if m.createErr != nil {
+		return "", "", m.createErr
+	}
+	id := m.createdID
+	if id == "" {
+		id = "mockcont1234"
+	}
+	merged := m.createdMerged
+	if merged == "" {
+		merged = "/containers/" + id + "/merged"
+	}
+	return id, merged, nil
+}
+
+func (m *mockContainerStore) Destroy(id string) error {
+	m.destroyedIDs = append(m.destroyedIDs, id)
+	if m.onDestroy != nil {
+		m.onDestroy()
+	}
+	return m.destroyErr
+}
+
+func (m *mockContainerStore) MergedPath(id string) string {
+	if m.mergedPath != "" {
+		return m.mergedPath
+	}
+	return "/containers/" + id + "/merged"
+}
+
+func (m *mockContainerStore) UpperPath(id string) string {
+	if m.upperPath != "" {
+		return m.upperPath
+	}
+	return "/containers/" + id + "/upper"
+}
+
+func (m *mockContainerStore) WorkPath(id string) string {
+	if m.workPath != "" {
+		return m.workPath
+	}
+	return "/containers/" + id + "/work"
+}
+
+// mockOverlayMounter records overlay mount and unmount calls.
+type mockOverlayMounter struct {
+	mountCalls   [][]string
+	unmountCalls []string
+	mountErr     error
+	unmountErr   error
+
+	onMount   func()
+	onUnmount func()
+}
+
+func (m *mockOverlayMounter) Mount(lowerdir, upperdir, workdir, mergeddir string) error {
+	m.mountCalls = append(m.mountCalls, []string{lowerdir, upperdir, workdir, mergeddir})
+	if m.onMount != nil {
+		m.onMount()
+	}
+	return m.mountErr
+}
+
+func (m *mockOverlayMounter) Unmount(mergeddir string) error {
+	m.unmountCalls = append(m.unmountCalls, mergeddir)
+	if m.onUnmount != nil {
+		m.onUnmount()
+	}
+	return m.unmountErr
+}
+
+func TestRunWith_CreatesOverlayBeforeStart(t *testing.T) {
+	var order []string
+
+	mockRunner := &mockCmdRunner{
+		onStart: func() { order = append(order, "runner.Start") },
+	}
+	mockStore := &mockContainerStore{
+		onCreate: func() { order = append(order, "store.Create") },
+	}
+	mockOverlay := &mockOverlayMounter{
+		onMount: func() { order = append(order, "overlay.Mount") },
+	}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err != nil {
+		t.Fatalf("runWith failed: %v", err)
+	}
+
+	// Verify order: store.Create -> overlay.Mount -> runner.Start
+	if len(order) < 3 {
+		t.Fatalf("expected at least 3 lifecycle events, got: %v", order)
+	}
+	if order[0] != "store.Create" || order[1] != "overlay.Mount" || order[2] != "runner.Start" {
+		t.Errorf("expected sequence [store.Create, overlay.Mount, runner.Start], got %v", order)
+	}
+
+	// Verify MC_ROOTFS passed to child is the merged path, not the base image path
+	expectedMerged := "/containers/mockcont1234/merged"
+	foundMerged := false
+	for _, env := range mockRunner.lastCmd.Env {
+		if env == rootfsEnvKey+"="+expectedMerged {
+			foundMerged = true
+			break
+		}
+	}
+	if !foundMerged {
+		t.Errorf("expected %s=%s in cmd.Env, got: %v", rootfsEnvKey, expectedMerged, mockRunner.lastCmd.Env)
+	}
+}
+
+func TestRunWith_MountsOverlayBeforeStart(t *testing.T) {
+	mockRunner := &mockCmdRunner{}
+	mockStore := &mockContainerStore{
+		createdID:     "c12345678901",
+		createdMerged: "/containers/c12345678901/merged",
+	}
+	mockOverlay := &mockOverlayMounter{}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err != nil {
+		t.Fatalf("runWith failed: %v", err)
+	}
+
+	if len(mockOverlay.mountCalls) != 1 {
+		t.Fatalf("expected 1 mount call, got %d", len(mockOverlay.mountCalls))
+	}
+
+	call := mockOverlay.mountCalls[0]
+	expectedLower := "/images/alpine/rootfs"
+	expectedUpper := "/containers/c12345678901/upper"
+	expectedWork := "/containers/c12345678901/work"
+	expectedMerged := "/containers/c12345678901/merged"
+
+	if call[0] != expectedLower || call[1] != expectedUpper || call[2] != expectedWork || call[3] != expectedMerged {
+		t.Errorf("mount call mismatch:\ngot:  %v\nwant: [%s, %s, %s, %s]", call, expectedLower, expectedUpper, expectedWork, expectedMerged)
+	}
+}
+
+func TestRunWith_UnmountsAndDestroysOnExit(t *testing.T) {
+	var cleanupOrder []string
+
+	mockRunner := &mockCmdRunner{}
+	mockStore := &mockContainerStore{
+		createdID: "c12345678901",
+		onDestroy: func() { cleanupOrder = append(cleanupOrder, "store.Destroy") },
+	}
+	mockOverlay := &mockOverlayMounter{
+		onUnmount: func() { cleanupOrder = append(cleanupOrder, "overlay.Unmount") },
+	}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err != nil {
+		t.Fatalf("runWith failed: %v", err)
+	}
+
+	if len(mockOverlay.unmountCalls) != 1 {
+		t.Errorf("expected 1 unmount call, got %d", len(mockOverlay.unmountCalls))
+	}
+	if len(mockStore.destroyedIDs) != 1 || mockStore.destroyedIDs[0] != "c12345678901" {
+		t.Errorf("expected container c12345678901 destroyed, got %v", mockStore.destroyedIDs)
+	}
+
+	// Must unmount BEFORE destroying the directory
+	if len(cleanupOrder) != 2 || cleanupOrder[0] != "overlay.Unmount" || cleanupOrder[1] != "store.Destroy" {
+		t.Errorf("expected cleanup order [overlay.Unmount, store.Destroy], got: %v", cleanupOrder)
+	}
+}
+
+func TestRunWith_UnmountsOnError(t *testing.T) {
+	mockRunner := &mockCmdRunner{
+		waitErr: errors.New("process exited with status 1"),
+	}
+	mockStore := &mockContainerStore{
+		createdID: "c-err",
+	}
+	mockOverlay := &mockOverlayMounter{}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err == nil {
+		t.Fatal("expected error from runWith, got nil")
+	}
+
+	// Even on error, unmount and destroy must be executed
+	if len(mockOverlay.unmountCalls) != 1 {
+		t.Errorf("expected 1 unmount call on error, got %d", len(mockOverlay.unmountCalls))
+	}
+	if len(mockStore.destroyedIDs) != 1 {
+		t.Errorf("expected 1 destroy call on error, got %d", len(mockStore.destroyedIDs))
+	}
+}
+
+func TestRunWith_OverlayCreateError_AbortsBeforeStart(t *testing.T) {
+	mockRunner := &mockCmdRunner{}
+	mockStore := &mockContainerStore{
+		createErr: errors.New("out of space"),
+	}
+	mockOverlay := &mockOverlayMounter{}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if mockRunner.lastCmd != nil {
+		t.Error("expected runner.Start not to be called when store.Create fails")
+	}
+	if len(mockOverlay.mountCalls) != 0 {
+		t.Error("expected overlay.Mount not to be called when store.Create fails")
+	}
+}
+
+func TestRunWith_OverlayMountError_CleansUpStoreAndAborts(t *testing.T) {
+	mockRunner := &mockCmdRunner{}
+	mockStore := &mockContainerStore{
+		createdID: "c-mount-fail",
+	}
+	mockOverlay := &mockOverlayMounter{
+		mountErr: errors.New("overlay mount failed"),
+	}
+
+	cfg := Config{
+		Command:  "/bin/sh",
+		Hostname: "cow-box",
+		Rootfs:   "/images/alpine/rootfs",
+	}
+
+	err := runWith(cfg, mockRunner, mockStore, mockOverlay)
+	if err == nil {
+		t.Fatal("expected error, got nil")
+	}
+
+	if mockRunner.lastCmd != nil {
+		t.Error("expected runner.Start not to be called when overlay.Mount fails")
+	}
+	if len(mockStore.destroyedIDs) != 1 || mockStore.destroyedIDs[0] != "c-mount-fail" {
+		t.Errorf("expected store.Destroy to be called to clean up allocated dir, got %v", mockStore.destroyedIDs)
+	}
+}
+
+

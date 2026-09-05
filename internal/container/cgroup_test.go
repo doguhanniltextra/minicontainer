@@ -42,6 +42,11 @@ func (m *mockFsWriter) Remove(name string) error {
 	return m.removeErr
 }
 
+func (m *mockFsWriter) RemoveAll(name string) error {
+	m.removeCalls = append(m.removeCalls, name)
+	return m.removeErr
+}
+
 func TestNewCgroupManager_CreatesUniqueDirectory(t *testing.T) {
 	mock := newMockFsWriter()
 	cm, err := newCgroupManagerWith(mock)

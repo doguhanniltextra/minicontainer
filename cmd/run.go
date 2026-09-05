@@ -20,11 +20,12 @@ const (
 
 // runOptions holds the parsed flag configuration for a container run.
 type runOptions struct {
-	rootfs      string
-	memoryLimit int64
-	pidsLimit   int64
-	cpuQuota    int64
-	cpuPeriod   int64
+	rootfs        string
+	memoryLimit   int64
+	pidsLimit     int64
+	cpuQuota      int64
+	cpuPeriod     int64
+	userNamespace bool
 }
 
 // containerRunner abstracts executing the container logic from the CLI command.
@@ -170,6 +171,12 @@ func parseRunArgs(args []string) (runOptions, []string, error) {
 			continue
 		}
 
+		if args[i] == "--user-namespace" || args[i] == "-u" {
+			opts.userNamespace = true
+			i++
+			continue
+		}
+
 		// First non-flag argument marks the start of the container command
 		break
 	}
@@ -185,7 +192,7 @@ func parseRunArgs(args []string) (runOptions, []string, error) {
 // newRunCmd constructs the `minicontainer run` subcommand with the provided runner.
 func newRunCmd(runner containerRunner) *cobra.Command {
 	return &cobra.Command{
-		Use:                "run [--rootfs <path>] [-m|--memory <limit>] [-p|--pids <limit>] [-c|--cpus <cores>] <command> [args...]",
+		Use:                "run [--rootfs <path>] [-m|--memory <limit>] [-p|--pids <limit>] [-c|--cpus <cores>] [-u|--user-namespace] <command> [args...]",
 		Short:              "Start a new container",
 		DisableFlagParsing: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -199,14 +206,15 @@ func newRunCmd(runner containerRunner) *cobra.Command {
 			}
 
 			cfg := container.Config{
-				Command:     cmdArgs[0],
-				Args:        cmdArgs[1:],
-				Hostname:    defaultHostname,
-				Rootfs:      opts.rootfs,
-				MemoryLimit: opts.memoryLimit,
-				PidsLimit:   opts.pidsLimit,
-				CpuQuota:    opts.cpuQuota,
-				CpuPeriod:   opts.cpuPeriod,
+				Command:       cmdArgs[0],
+				Args:          cmdArgs[1:],
+				Hostname:      defaultHostname,
+				Rootfs:        opts.rootfs,
+				MemoryLimit:   opts.memoryLimit,
+				PidsLimit:     opts.pidsLimit,
+				CpuQuota:      opts.cpuQuota,
+				CpuPeriod:     opts.cpuPeriod,
+				UserNamespace: opts.userNamespace,
 			}
 			return runner(cfg)
 		},

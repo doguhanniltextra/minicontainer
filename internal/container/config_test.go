@@ -29,6 +29,15 @@ func TestConfig_DefaultZeroValues(t *testing.T) {
 	if cfg.CpuPeriod != 0 {
 		t.Errorf("zero-value CpuPeriod should be 0, got %d", cfg.CpuPeriod)
 	}
+	if cfg.IPAddress != "" {
+		t.Errorf("zero-value IPAddress should be empty string, got %q", cfg.IPAddress)
+	}
+	if cfg.Gateway != "" {
+		t.Errorf("zero-value Gateway should be empty string, got %q", cfg.Gateway)
+	}
+	if cfg.Bridge != "" {
+		t.Errorf("zero-value Bridge should be empty string, got %q", cfg.Bridge)
+	}
 }
 
 func TestConfig_FieldAssignment(t *testing.T) {
@@ -41,6 +50,9 @@ func TestConfig_FieldAssignment(t *testing.T) {
 		PidsLimit:   20,
 		CpuQuota:    50000,
 		CpuPeriod:   100000,
+		IPAddress:   "172.19.0.2/16",
+		Gateway:     "172.19.0.1",
+		Bridge:      "mc-br0",
 	}
 
 	if cfg.Command != "/bin/bash" {
@@ -66,6 +78,15 @@ func TestConfig_FieldAssignment(t *testing.T) {
 	}
 	if cfg.CpuPeriod != 100000 {
 		t.Errorf("expected CpuPeriod 100000, got %d", cfg.CpuPeriod)
+	}
+	if cfg.IPAddress != "172.19.0.2/16" {
+		t.Errorf("expected IPAddress %q, got %q", "172.19.0.2/16", cfg.IPAddress)
+	}
+	if cfg.Gateway != "172.19.0.1" {
+		t.Errorf("expected Gateway %q, got %q", "172.19.0.1", cfg.Gateway)
+	}
+	if cfg.Bridge != "mc-br0" {
+		t.Errorf("expected Bridge %q, got %q", "mc-br0", cfg.Bridge)
 	}
 }
 

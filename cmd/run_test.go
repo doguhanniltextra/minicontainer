@@ -396,3 +396,26 @@ func TestNewRunCmd_InvalidFlagValues(t *testing.T) {
 	}
 }
 
+func TestNewRunCmd_ParsesUserNamespaceFlag(t *testing.T) {
+	for _, flag := range []string{"--user-namespace", "-u"} {
+		var capturedCfg container.Config
+		mockRunner := func(cfg container.Config) error {
+			capturedCfg = cfg
+			return nil
+		}
+
+		cmd := newRunCmd(mockRunner)
+		cmd.SetArgs([]string{flag, "/bin/sh", "-c", "whoami"})
+
+		err := cmd.Execute()
+		if err != nil {
+			t.Fatalf("unexpected error for %s: %v", flag, err)
+		}
+
+		if !capturedCfg.UserNamespace {
+			t.Errorf("expected UserNamespace=true when passing %s", flag)
+		}
+	}
+}
+
+

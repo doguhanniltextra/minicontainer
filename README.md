@@ -9,6 +9,8 @@
 
 It demonstrates how real container engines work under the hood by implementing **Namespaces**, **Cgroups v2**, **OverlayFS (Copy-on-Write)**, **Bridge Networking & NAT**, and **Security Hardening** from first principles.
 
+Note: This repository is not an alternative to Docker or other production container runtimes (runc, containerd, etc.). It is an educational project built to understand how container isolation works at the kernel level, not intended for production use.
+
 ---
 
 ## Features
